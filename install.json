@@ -11,6 +11,14 @@
     {
       "method": "shell.run",
       "params": {
+        "message": [
+          "conda install -y sox"
+        ]
+      }
+    },
+    {
+      "method": "shell.run",
+      "params": {
         "venv": "venv",
         "path": "app",
         "chain": true,

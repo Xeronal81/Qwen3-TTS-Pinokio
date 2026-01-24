@@ -10,11 +10,11 @@
         "env": {},
         "input": null,
         "message": [
-          "python app.py"
+          "{{platform === 'darwin' ? 'python app_mac.py' : 'python app.py'}}"
         ],
         "on": [
           {
-            "event": "/http://\\S+/",
+            "event": "/(http:\\/\\/[0-9.:]+)/",
             "done": true
           }
         ]
@@ -24,7 +24,7 @@
       "when": "{{input && input.event && Array.isArray(input.event) && input.event.length > 0}}",
       "method": "local.set",
       "params": {
-        "url": "{{input.event[0]}}"
+        "url": "{{input.event[1]}}"
       }
     }
   ]
