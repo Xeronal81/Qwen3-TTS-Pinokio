@@ -1,7 +1,7 @@
 module.exports = {
   version: "5.0",
   title: "Qwen3-TTS",
-  description: "NVIDIA - Qwen3-TTS is an open-source series of TTS models developed by the Qwen team",
+  description: "Qwen3-TTS is an open-source series of TTS models developed by the Qwen team",
   icon: "icon.png",
   menu: async (kernel, info) => {
     let installed = info.exists("app/venv")
@@ -86,4 +86,5 @@ module.exports = {
     }
   }
 }
+
 
