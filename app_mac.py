@@ -45,7 +45,7 @@ def get_whisper_model():
     global whisper_model
     if whisper_model is None:
         import whisper
-        whisper_model = whisper.load_model("tiny", device=get_device())
+        whisper_model = whisper.load_model("tiny", device="cuda" if torch.cuda.is_available() else "cpu")
     return whisper_model
 
 
@@ -1348,11 +1348,10 @@ You are having a natural voice conversation. Rules:
         print(f"\n✅ Total response time: {total_time:.2f}s")
         print(f"{'='*50}\n")
 
-        # Format chat history for display
+        # Format chat history for display (tuple format for older Gradio)
         chat_display = []
         for turn in voice_chat_history:
-            chat_display.append({"role": "user", "content": turn["user"]})
-            chat_display.append({"role": "assistant", "content": turn["assistant"]})
+            chat_display.append((turn["user"], turn["assistant"]))
 
         status = f"✅ Response generated in {total_time:.1f}s (STT: {stt_time-start_time:.1f}s, LLM: {llm_time-stt_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
 
@@ -1362,7 +1361,9 @@ You are having a natural voice conversation. Rules:
         print(f"❌ Error: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        return None, f"❌ Error: {str(e)}", voice_chat_history
+        # Return empty list for chat display on error
+        chat_display = [(turn["user"], turn["assistant"]) for turn in voice_chat_history]
+        return None, f"❌ Error: {str(e)}", chat_display
 
 
 def text_chat_respond(
@@ -1433,10 +1434,10 @@ You are having a natural voice conversation. Rules:
         print(f"\n✅ Total response time: {total_time:.2f}s")
         print(f"{'='*50}\n")
 
+        # Format chat history for display (tuple format for older Gradio)
         chat_display = []
         for turn in voice_chat_history:
-            chat_display.append({"role": "user", "content": turn["user"]})
-            chat_display.append({"role": "assistant", "content": turn["assistant"]})
+            chat_display.append((turn["user"], turn["assistant"]))
 
         status = f"✅ Response in {total_time:.1f}s (LLM: {llm_time-start_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
 
@@ -1446,7 +1447,8 @@ You are having a natural voice conversation. Rules:
         print(f"❌ Error: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        return None, f"❌ Error: {str(e)}", voice_chat_history, text_input
+        chat_display = [(turn["user"], turn["assistant"]) for turn in voice_chat_history]
+        return None, f"❌ Error: {str(e)}", chat_display, text_input
 
 
 # Build Gradio UI
@@ -2152,7 +2154,6 @@ def build_ui():
                         chat_history_display = gr.Chatbot(
                             label="Chat History",
                             height=300,
-                            type="messages",
                         )
                         chat_audio_output = gr.Audio(
                             label="AI Response",
