@@ -327,7 +327,21 @@ def get_llm_loaded_status() -> str:
     global llm_model
     if llm_model is None:
         return "No LLM currently loaded."
-    return f"**Loaded LLM:** Qwen3-4B-Instruct"
+
+    # Get device info
+    try:
+        device = next(llm_model.parameters()).device
+        device_str = str(device)
+        if "cuda" in device_str:
+            device_info = f"🟢 GPU ({device_str})"
+        elif "mps" in device_str:
+            device_info = f"🟢 Apple Silicon ({device_str})"
+        else:
+            device_info = f"🟡 CPU ({device_str})"
+    except:
+        device_info = "Unknown"
+
+    return f"**Loaded LLM:** Qwen3-4B-Instruct\n**Device:** {device_info}"
 
 
 def load_llm(llm_name: str, progress=gr.Progress()):
@@ -350,20 +364,37 @@ def load_llm(llm_name: str, progress=gr.Progress()):
         print(f"🤖 Loading LLM: {llm_name}")
         print(f"{'='*50}")
 
+        # Determine device
+        if torch.cuda.is_available():
+            device_map = "cuda"
+            print(f"🎮 Using CUDA GPU")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device_map = "mps"
+            print(f"🍎 Using Apple Silicon MPS")
+        else:
+            device_map = "cpu"
+            print(f"💻 Using CPU (no GPU available)")
+
         llm_tokenizer = AutoTokenizer.from_pretrained(repo_id)
         llm_model = AutoModelForCausalLM.from_pretrained(
             repo_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            torch_dtype=torch.bfloat16 if device_map != "cpu" else torch.float32,
+            device_map=device_map if device_map != "cpu" else None,
         )
 
+        # Move to device if CPU (device_map doesn't work for CPU)
+        if device_map == "cpu":
+            llm_model = llm_model.to("cpu")
+
         progress(1, desc="Complete!")
-        print(f"✅ LLM loaded successfully!")
+        print(f"✅ LLM loaded successfully on {device_map}!")
         print(f"{'='*50}\n")
 
-        return f"✅ Successfully loaded {llm_name}!", get_llm_loaded_status()
+        return f"✅ Successfully loaded {llm_name} on {device_map.upper()}!", get_llm_loaded_status()
     except Exception as e:
         print(f"❌ Error loading LLM: {e}")
+        import traceback
+        traceback.print_exc()
         return f"❌ Error loading {llm_name}: {str(e)}", get_llm_loaded_status()
 
 
