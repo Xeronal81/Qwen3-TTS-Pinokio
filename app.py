@@ -362,15 +362,26 @@ def load_llm(llm_name: str, progress=gr.Progress()):
             print(f"💻 Using CPU (no GPU available)")
 
         llm_tokenizer = AutoTokenizer.from_pretrained(repo_id)
-        llm_model = AutoModelForCausalLM.from_pretrained(
-            repo_id,
-            torch_dtype=torch.bfloat16 if device_map != "cpu" else torch.float32,
-            device_map=device_map if device_map != "cpu" else None,
-        )
 
-        # Move to device if CPU (device_map doesn't work for CPU)
-        if device_map == "cpu":
-            llm_model = llm_model.to("cpu")
+        # Load model - use device_map="auto" for proper weight loading
+        if device_map == "cuda":
+            llm_model = AutoModelForCausalLM.from_pretrained(
+                repo_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",  # Let accelerate handle device placement
+            )
+        elif device_map == "mps":
+            # MPS doesn't work well with device_map, load to CPU then move
+            llm_model = AutoModelForCausalLM.from_pretrained(
+                repo_id,
+                torch_dtype=torch.float32,  # MPS works better with float32
+            ).to("mps")
+        else:
+            # CPU
+            llm_model = AutoModelForCausalLM.from_pretrained(
+                repo_id,
+                torch_dtype=torch.float32,
+            )
 
         progress(1, desc="Complete!")
         print(f"✅ LLM loaded successfully on {device_map}!")
