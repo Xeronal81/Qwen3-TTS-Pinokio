@@ -1262,6 +1262,11 @@ def run_conversation(
 voice_chat_history = []
 
 
+def get_chat_display():
+    """Format voice_chat_history as tuples for Gradio Chatbot."""
+    return [(turn["user"], turn["assistant"]) for turn in voice_chat_history]
+
+
 def clear_voice_chat_history():
     """Clear the voice chat history."""
     global voice_chat_history
@@ -1281,13 +1286,13 @@ def voice_chat_respond(
     global voice_chat_history, llm_model
 
     if llm_model is None:
-        return None, "❌ Please load the LLM first in the Models tab.", voice_chat_history
+        return None, "❌ Please load the LLM first in the Models tab.", get_chat_display()
 
     if not voice_file:
-        return None, "❌ Please select a voice file.", voice_chat_history
+        return None, "❌ Please select a voice file.", get_chat_display()
 
     if audio_input is None:
-        return None, "❌ No audio input received. Please record something.", voice_chat_history
+        return None, "❌ No audio input received. Please record something.", get_chat_display()
 
     try:
         import time
@@ -1300,7 +1305,7 @@ def voice_chat_respond(
 
         user_text = transcribe_audio(audio_input)
         if user_text.startswith("Transcription error") or user_text == "Please upload audio first.":
-            return None, f"❌ {user_text}", voice_chat_history
+            return None, f"❌ {user_text}", get_chat_display()
 
         print(f"👤 You: {user_text}")
         stt_time = time.time()
@@ -1376,13 +1381,13 @@ def text_chat_respond(
     global voice_chat_history, llm_model
 
     if llm_model is None:
-        return None, "❌ Please load the LLM first in the Models tab.", voice_chat_history, ""
+        return None, "❌ Please load the LLM first in the Models tab.", get_chat_display(), ""
 
     if not voice_file:
-        return None, "❌ Please select a voice file.", voice_chat_history, ""
+        return None, "❌ Please select a voice file.", get_chat_display(), ""
 
     if not text_input or not text_input.strip():
-        return None, "❌ Please enter a message.", voice_chat_history, ""
+        return None, "❌ Please enter a message.", get_chat_display(), ""
 
     try:
         import time
