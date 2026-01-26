@@ -1243,6 +1243,199 @@ def run_conversation(
     return None, "❌ No audio generated.", ""
 
 
+# ============================================
+# Voice Chat Functions (Real-time conversation)
+# ============================================
+
+# Store chat history for voice chat
+voice_chat_history = []
+
+
+def clear_voice_chat_history():
+    """Clear the voice chat history."""
+    global voice_chat_history
+    voice_chat_history = []
+    return [], "Chat history cleared."
+
+
+def voice_chat_respond(
+    audio_input,
+    voice_file: str,
+    personality: str,
+    ai_name: str,
+    model_size: str,
+    max_history: int = 10
+):
+    """Process voice input and generate voice response."""
+    global voice_chat_history, llm_model
+
+    if llm_model is None:
+        return None, "❌ Please load the LLM first in the Models tab.", voice_chat_history
+
+    if not voice_file:
+        return None, "❌ Please select a voice file.", voice_chat_history
+
+    if audio_input is None:
+        return None, "❌ No audio input received. Please record something.", voice_chat_history
+
+    try:
+        import time
+        start_time = time.time()
+
+        # Step 1: Transcribe user's speech
+        print(f"\n{'='*50}")
+        print(f"🎙️ Voice Chat - Processing input...")
+        print(f"{'='*50}")
+
+        user_text = transcribe_audio(audio_input)
+        if user_text.startswith("Transcription error") or user_text == "Please upload audio first.":
+            return None, f"❌ {user_text}", voice_chat_history
+
+        print(f"👤 You: {user_text}")
+        stt_time = time.time()
+        print(f"   ⏱️ STT: {stt_time - start_time:.2f}s")
+
+        # Step 2: Generate LLM response
+        system_prompt = f"""You are {ai_name}. {personality}
+
+You are having a natural voice conversation. Rules:
+- Keep responses concise (1-3 sentences) for natural conversation flow
+- Be engaging and conversational
+- Respond directly without quotation marks or labels
+- React naturally to what the user said"""
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Add conversation history (limited to max_history)
+        for turn in voice_chat_history[-max_history:]:
+            messages.append({"role": "user", "content": turn["user"]})
+            messages.append({"role": "assistant", "content": turn["assistant"]})
+
+        # Add current user message
+        messages.append({"role": "user", "content": user_text})
+
+        # Generate response
+        ai_response = generate_llm_response(messages, max_tokens=100)
+        print(f"🤖 {ai_name}: {ai_response}")
+        llm_time = time.time()
+        print(f"   ⏱️ LLM: {llm_time - stt_time:.2f}s")
+
+        # Step 3: Generate TTS
+        wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
+        tts_time = time.time()
+        print(f"   ⏱️ TTS: {tts_time - llm_time:.2f}s")
+
+        # Update history
+        voice_chat_history.append({
+            "user": user_text,
+            "assistant": ai_response
+        })
+
+        total_time = time.time() - start_time
+        print(f"\n✅ Total response time: {total_time:.2f}s")
+        print(f"{'='*50}\n")
+
+        # Format chat history for display
+        chat_display = []
+        for turn in voice_chat_history:
+            chat_display.append({"role": "user", "content": turn["user"]})
+            chat_display.append({"role": "assistant", "content": turn["assistant"]})
+
+        status = f"✅ Response generated in {total_time:.1f}s (STT: {stt_time-start_time:.1f}s, LLM: {llm_time-stt_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
+
+        return (sr, wav), status, chat_display
+
+    except Exception as e:
+        print(f"❌ Error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, f"❌ Error: {str(e)}", voice_chat_history
+
+
+def text_chat_respond(
+    text_input: str,
+    voice_file: str,
+    personality: str,
+    ai_name: str,
+    model_size: str,
+    max_history: int = 10
+):
+    """Process text input and generate voice response (for typing instead of speaking)."""
+    global voice_chat_history, llm_model
+
+    if llm_model is None:
+        return None, "❌ Please load the LLM first in the Models tab.", voice_chat_history, ""
+
+    if not voice_file:
+        return None, "❌ Please select a voice file.", voice_chat_history, ""
+
+    if not text_input or not text_input.strip():
+        return None, "❌ Please enter a message.", voice_chat_history, ""
+
+    try:
+        import time
+        start_time = time.time()
+
+        user_text = text_input.strip()
+
+        print(f"\n{'='*50}")
+        print(f"💬 Text Chat - Processing...")
+        print(f"{'='*50}")
+        print(f"👤 You: {user_text}")
+
+        # Generate LLM response
+        system_prompt = f"""You are {ai_name}. {personality}
+
+You are having a natural voice conversation. Rules:
+- Keep responses concise (1-3 sentences) for natural conversation flow
+- Be engaging and conversational
+- Respond directly without quotation marks or labels
+- React naturally to what the user said"""
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        for turn in voice_chat_history[-max_history:]:
+            messages.append({"role": "user", "content": turn["user"]})
+            messages.append({"role": "assistant", "content": turn["assistant"]})
+
+        messages.append({"role": "user", "content": user_text})
+
+        ai_response = generate_llm_response(messages, max_tokens=100)
+        print(f"🤖 {ai_name}: {ai_response}")
+        llm_time = time.time()
+        print(f"   ⏱️ LLM: {llm_time - start_time:.2f}s")
+
+        # Generate TTS
+        wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
+        tts_time = time.time()
+        print(f"   ⏱️ TTS: {tts_time - llm_time:.2f}s")
+
+        # Update history
+        voice_chat_history.append({
+            "user": user_text,
+            "assistant": ai_response
+        })
+
+        total_time = time.time() - start_time
+        print(f"\n✅ Total response time: {total_time:.2f}s")
+        print(f"{'='*50}\n")
+
+        chat_display = []
+        for turn in voice_chat_history:
+            chat_display.append({"role": "user", "content": turn["user"]})
+            chat_display.append({"role": "assistant", "content": turn["assistant"]})
+
+        status = f"✅ Response in {total_time:.1f}s (LLM: {llm_time-start_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
+
+        return (sr, wav), status, chat_display, ""  # Clear text input
+
+    except Exception as e:
+        print(f"❌ Error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, f"❌ Error: {str(e)}", voice_chat_history, text_input
+
+
 # Build Gradio UI
 def build_ui():
     theme = gr.themes.Soft(
@@ -1900,6 +2093,111 @@ def build_ui():
                         conv_topic, conv_turns, conv_pause, conv_model_size
                     ],
                     outputs=[conv_audio_out, conv_status, conv_transcript],
+                )
+
+            # Tab 5: Voice Chat (Real-time conversation)
+            with gr.Tab("🎤 Voice Chat"):
+                gr.Markdown("""
+                ### Real-Time Voice Chat
+                *Talk to an AI character using your saved voice profile. Speak or type - get voice responses!*
+
+                **Requirements:**
+                1. Load the LLM in the Models tab
+                2. Load the Base TTS model (will auto-load on first use)
+                3. Select a saved voice profile
+                """)
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 🤖 AI Character")
+                        chat_voice = gr.Dropdown(
+                            label="Voice Profile",
+                            choices=get_saved_voices_list(),
+                            interactive=True,
+                        )
+                        chat_ai_name = gr.Textbox(
+                            label="AI Name",
+                            value="Assistant",
+                            placeholder="Name of the AI character",
+                        )
+                        chat_personality = gr.Textbox(
+                            label="Personality",
+                            lines=4,
+                            value="You are a friendly and helpful AI assistant. You're knowledgeable, witty, and enjoy having conversations. You speak naturally and concisely.",
+                            placeholder="Describe the AI's personality...",
+                        )
+                        chat_model_size = gr.Dropdown(
+                            label="TTS Model Size",
+                            choices=MODEL_SIZES,
+                            value="1.7B",
+                            interactive=True,
+                        )
+                        chat_refresh_btn = gr.Button("🔄 Refresh Voice List", size="sm")
+
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 💬 Conversation")
+                        chat_history_display = gr.Chatbot(
+                            label="Chat History",
+                            height=300,
+                            type="messages",
+                        )
+                        chat_audio_output = gr.Audio(
+                            label="AI Response",
+                            type="numpy",
+                            autoplay=True,  # Auto-play the response
+                        )
+                        chat_status = gr.Textbox(label="Status", lines=1, interactive=False)
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 🎙️ Voice Input (Push-to-Talk)")
+                        chat_audio_input = gr.Audio(
+                            label="Record your message",
+                            sources=["microphone"],
+                            type="numpy",
+                        )
+                        chat_voice_btn = gr.Button("🎤 Send Voice Message", variant="primary", size="lg")
+
+                    with gr.Column(scale=2):
+                        gr.Markdown("### ⌨️ Text Input (Alternative)")
+                        chat_text_input = gr.Textbox(
+                            label="Type your message",
+                            placeholder="Or type here instead of speaking...",
+                            lines=2,
+                        )
+                        chat_text_btn = gr.Button("💬 Send Text Message", variant="secondary", size="lg")
+
+                with gr.Row():
+                    chat_clear_btn = gr.Button("🗑️ Clear Chat History", variant="stop", size="sm")
+
+                # Event handlers
+                chat_refresh_btn.click(
+                    lambda: gr.update(choices=get_saved_voices_list()),
+                    outputs=[chat_voice],
+                )
+
+                chat_voice_btn.click(
+                    voice_chat_respond,
+                    inputs=[chat_audio_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    outputs=[chat_audio_output, chat_status, chat_history_display],
+                )
+
+                chat_text_btn.click(
+                    text_chat_respond,
+                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    outputs=[chat_audio_output, chat_status, chat_history_display, chat_text_input],
+                )
+
+                # Also allow Enter key to send text
+                chat_text_input.submit(
+                    text_chat_respond,
+                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    outputs=[chat_audio_output, chat_status, chat_history_display, chat_text_input],
+                )
+
+                chat_clear_btn.click(
+                    clear_voice_chat_history,
+                    outputs=[chat_history_display, chat_status],
                 )
 
     return demo, theme, css
