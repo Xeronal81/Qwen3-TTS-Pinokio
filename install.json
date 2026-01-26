@@ -9,6 +9,20 @@
       }
     },
     {
+      "method": "fs.copy",
+      "params": {
+        "src": "app.py",
+        "dest": "app/app.py"
+      }
+    },
+    {
+      "method": "fs.copy",
+      "params": {
+        "src": "app_mac.py",
+        "dest": "app/app_mac.py"
+      }
+    },
+    {
       "method": "shell.run",
       "params": {
         "message": [
