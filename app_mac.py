@@ -65,8 +65,6 @@ def unload_whisper():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        torch.mps.empty_cache()
 
 
 def transcribe_audio(audio):
@@ -94,8 +92,7 @@ def transcribe_audio(audio):
             wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
         
         model = get_whisper_model()
-        device = get_device()
-        result = model.transcribe(wav, fp16=(device == "cuda"))
+        result = model.transcribe(wav, fp16=torch.cuda.is_available())
         text = result["text"].strip()
         
         # Unload whisper to free GPU memory
@@ -109,6 +106,10 @@ def transcribe_audio(audio):
 
 # Global model holders - keyed by (model_type, model_size)
 loaded_models = {}
+
+# Global LLM model holder
+llm_model = None
+llm_tokenizer = None
 
 # Model size options
 MODEL_SIZES = ["0.6B", "1.7B"]
@@ -126,6 +127,14 @@ AVAILABLE_MODELS = {
     "CustomVoice": {
         "sizes": ["0.6B", "1.7B"],
         "description": "TTS with predefined speakers and style instructions"
+    }
+}
+
+# Available LLM models for conversation generation
+AVAILABLE_LLMS = {
+    "Qwen3-4B-Instruct": {
+        "repo_id": "Qwen/Qwen3-4B-Instruct-2507",
+        "description": "Qwen3 4B - Great for conversations, matches TTS family"
     }
 }
 
@@ -196,23 +205,12 @@ def get_model(model_type: str, model_size: str):
     if key not in loaded_models:
         from qwen_tts import Qwen3TTSModel
         model_path = get_model_path(model_type, model_size)
-        device = get_device()
-        
-        # Use appropriate device mapping and dtype
-        if device == "cuda":
-            loaded_models[key] = Qwen3TTSModel.from_pretrained(
-                model_path,
-                device_map="cuda",
-                dtype=torch.bfloat16,
-            )
-        else:
-            # For MPS and CPU, use CPU with float32
-            # MPS support for large models is experimental and can cause issues
-            loaded_models[key] = Qwen3TTSModel.from_pretrained(
-                model_path,
-                device_map="cpu",
-                dtype=torch.float32,
-            )
+        loaded_models[key] = Qwen3TTSModel.from_pretrained(
+            model_path,
+            device_map="cuda",
+            dtype=torch.bfloat16,
+#           attn_implementation="flash_attention_2",
+        )
     return loaded_models[key]
 
 
@@ -255,11 +253,7 @@ def unload_model(model_type: str, model_size: str):
     
     try:
         del loaded_models[key]
-        device = get_device()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
+        torch.cuda.empty_cache()
         return f"✅ Unloaded {model_type} {model_size} and freed GPU memory.", get_loaded_models_status()
     except Exception as e:
         return f"❌ Error unloading: {str(e)}", get_loaded_models_status()
@@ -268,21 +262,160 @@ def unload_model(model_type: str, model_size: str):
 def unload_all_models():
     """Unload all models from memory."""
     global loaded_models
-    
+
     if not loaded_models:
         return "⚠️ No models are currently loaded.", get_loaded_models_status()
-    
+
     try:
         count = len(loaded_models)
         loaded_models.clear()
-        device = get_device()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
+        torch.cuda.empty_cache()
         return f"✅ Unloaded {count} model(s) and freed GPU memory.", get_loaded_models_status()
     except Exception as e:
         return f"❌ Error unloading: {str(e)}", get_loaded_models_status()
+
+
+# ============================================
+# LLM Model Functions (for Conversation Mode)
+# ============================================
+
+def check_llm_downloaded(llm_name: str) -> bool:
+    """Check if an LLM is already downloaded in the cache."""
+    try:
+        cache_info = scan_cache_dir()
+        repo_id = AVAILABLE_LLMS.get(llm_name, {}).get("repo_id", "")
+        for repo in cache_info.repos:
+            if repo.repo_id == repo_id:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def get_llm_download_status() -> str:
+    """Get status of LLM models."""
+    lines = ["### LLM Models (for Conversation Mode)\n"]
+    for llm_name, info in AVAILABLE_LLMS.items():
+        status = "✅ Downloaded" if check_llm_downloaded(llm_name) else "⬜ Not downloaded"
+        lines.append(f"**{llm_name}** - {info['description']}")
+        lines.append(f"  - Status: {status}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def download_llm(llm_name: str, progress=gr.Progress()):
+    """Download an LLM model."""
+    if llm_name not in AVAILABLE_LLMS:
+        return f"❌ Unknown LLM: {llm_name}", get_llm_download_status()
+
+    repo_id = AVAILABLE_LLMS[llm_name]["repo_id"]
+
+    if check_llm_downloaded(llm_name):
+        return f"✅ {llm_name} is already downloaded!", get_llm_download_status()
+
+    try:
+        progress(0, desc=f"Downloading {llm_name}...")
+        snapshot_download(repo_id)
+        progress(1, desc="Complete!")
+        return f"✅ Successfully downloaded {llm_name}!", get_llm_download_status()
+    except Exception as e:
+        return f"❌ Error downloading {llm_name}: {str(e)}", get_llm_download_status()
+
+
+def get_llm_loaded_status() -> str:
+    """Get status of loaded LLM."""
+    global llm_model
+    if llm_model is None:
+        return "No LLM currently loaded."
+    return f"**Loaded LLM:** Qwen3-4B-Instruct"
+
+
+def load_llm(llm_name: str, progress=gr.Progress()):
+    """Load an LLM into memory."""
+    global llm_model, llm_tokenizer
+
+    if llm_name not in AVAILABLE_LLMS:
+        return f"❌ Unknown LLM: {llm_name}", get_llm_loaded_status()
+
+    if llm_model is not None:
+        return f"✅ LLM is already loaded!", get_llm_loaded_status()
+
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        repo_id = AVAILABLE_LLMS[llm_name]["repo_id"]
+        progress(0, desc=f"Loading {llm_name}...")
+
+        print(f"\n{'='*50}")
+        print(f"🤖 Loading LLM: {llm_name}")
+        print(f"{'='*50}")
+
+        llm_tokenizer = AutoTokenizer.from_pretrained(repo_id)
+        llm_model = AutoModelForCausalLM.from_pretrained(
+            repo_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
+
+        progress(1, desc="Complete!")
+        print(f"✅ LLM loaded successfully!")
+        print(f"{'='*50}\n")
+
+        return f"✅ Successfully loaded {llm_name}!", get_llm_loaded_status()
+    except Exception as e:
+        print(f"❌ Error loading LLM: {e}")
+        return f"❌ Error loading {llm_name}: {str(e)}", get_llm_loaded_status()
+
+
+def unload_llm():
+    """Unload the LLM from memory."""
+    global llm_model, llm_tokenizer
+
+    if llm_model is None:
+        return "⚠️ No LLM is currently loaded.", get_llm_loaded_status()
+
+    try:
+        del llm_model
+        del llm_tokenizer
+        llm_model = None
+        llm_tokenizer = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        return "✅ Unloaded LLM and freed GPU memory.", get_llm_loaded_status()
+    except Exception as e:
+        return f"❌ Error unloading: {str(e)}", get_llm_loaded_status()
+
+
+def generate_llm_response(messages: list, max_tokens: int = 150) -> str:
+    """Generate a response from the LLM."""
+    global llm_model, llm_tokenizer
+
+    if llm_model is None or llm_tokenizer is None:
+        raise RuntimeError("LLM not loaded. Please load the LLM first.")
+
+    text = llm_tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False  # Disable thinking for faster responses
+    )
+
+    inputs = llm_tokenizer([text], return_tensors="pt").to(llm_model.device)
+
+    with torch.no_grad():
+        outputs = llm_model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            pad_token_id=llm_tokenizer.eos_token_id,
+        )
+
+    # Decode only the new tokens
+    response = llm_tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    return response.strip()
 
 
 def _normalize_audio(wav, eps=1e-12, clip=True):
@@ -406,16 +539,12 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    device = get_device()
-    if device == "cuda":
+    if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         # Force deterministic algorithms
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-    elif device == "mps":
-        # MPS doesn't need special seed handling
-        pass
 
 
 def generate_voice_design(text, language, voice_description, seed):
@@ -852,6 +981,251 @@ def delete_voice_file(voice_file):
         return f"Error deleting: {e}", get_voice_files_info(), gr.update()
 
 
+# ============================================
+# Conversation Mode Functions
+# ============================================
+
+def generate_conversation_turn(
+    conversation_history: list,
+    speaker_name: str,
+    speaker_personality: str,
+    other_speaker_name: str,
+    topic: str,
+    is_first_turn: bool = False
+) -> str:
+    """Generate a single conversation turn using the LLM."""
+
+    system_prompt = f"""You are {speaker_name}. {speaker_personality}
+
+You are having a natural conversation with {other_speaker_name} about: {topic}
+
+Rules:
+- Respond naturally as {speaker_name} would, staying in character
+- Keep responses concise (1-3 sentences)
+- Be engaging and conversational
+- React to what the other person said
+- Don't use quotation marks or speaker labels
+- Just respond with your dialogue directly"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Add conversation history
+    for turn in conversation_history:
+        if turn["speaker"] == speaker_name:
+            messages.append({"role": "assistant", "content": turn["text"]})
+        else:
+            messages.append({"role": "user", "content": turn["text"]})
+
+    # If first turn, add a prompt to start
+    if is_first_turn:
+        messages.append({"role": "user", "content": f"Start the conversation about {topic}. Say something to begin."})
+
+    response = generate_llm_response(messages, max_tokens=100)
+
+    # Clean up response
+    response = response.strip().strip('"').strip("'")
+    # Remove any speaker labels that might have been generated
+    if response.startswith(f"{speaker_name}:"):
+        response = response[len(f"{speaker_name}:"):].strip()
+
+    return response
+
+
+def generate_voice_for_text(voice_file: str, text: str, model_size: str = "1.7B") -> tuple:
+    """Generate audio for text using a saved voice file."""
+    filepath = os.path.join(VOICE_FILES_DIR, f"{voice_file}.npz")
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Voice file '{voice_file}' not found.")
+
+    # Load voice data
+    data = np.load(filepath, allow_pickle=True)
+    spk_emb_np = data['ref_spk_embedding']
+    x_vector_only = bool(data.get('x_vector_only_mode', False))
+    ref_text = str(data.get('ref_text', ''))
+    ref_code_np = data.get('ref_code', None)
+
+    tts = get_model("Base", model_size)
+    device = tts.device
+
+    # Convert back to tensors
+    spk_emb = torch.from_numpy(spk_emb_np).to(device)
+    ref_code = None
+    if ref_code_np is not None:
+        ref_code = torch.from_numpy(ref_code_np).to(device)
+
+    # Build voice clone prompt
+    voice_clone_prompt = {
+        'ref_code': [ref_code] if not x_vector_only else [None],
+        'ref_spk_embedding': [spk_emb],
+        'x_vector_only_mode': [x_vector_only],
+        'icl_mode': [not x_vector_only],
+    }
+
+    # Build input text
+    input_text = f"<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    input_ids = tts.processor(text=input_text, return_tensors="pt", padding=True)["input_ids"].to(device)
+    input_ids = input_ids.unsqueeze(0) if input_ids.dim() == 1 else input_ids
+
+    # Build ref_ids if not x-vector only
+    ref_ids = None
+    if not x_vector_only and ref_text:
+        ref_text_formatted = f"<|im_start|>assistant\n{ref_text}<|im_end|>\n"
+        ref_tok = tts.processor(text=ref_text_formatted, return_tensors="pt", padding=True)["input_ids"].to(device)
+        ref_tok = ref_tok.unsqueeze(0) if ref_tok.dim() == 1 else ref_tok
+        ref_ids = [ref_tok]
+
+    # Generate
+    talker_codes_list, _ = tts.model.generate(
+        input_ids=[input_ids],
+        ref_ids=ref_ids,
+        voice_clone_prompt=voice_clone_prompt,
+        languages=["Auto"],
+        non_streaming_mode=True,
+        do_sample=True,
+        top_k=50,
+        top_p=1.0,
+        temperature=0.9,
+        repetition_penalty=1.05,
+        max_new_tokens=2048,
+    )
+
+    # Decode with ref_code prepended if ICL mode
+    codes = talker_codes_list[0]
+    if not x_vector_only and ref_code is not None:
+        codes_for_decode = torch.cat([ref_code.to(codes.device), codes], dim=0)
+    else:
+        codes_for_decode = codes
+
+    wavs_all, sr = tts.model.speech_tokenizer.decode([{"audio_codes": codes_for_decode}])
+
+    # Cut off the reference portion if ICL mode
+    wav = wavs_all[0]
+    if not x_vector_only and ref_code is not None:
+        ref_len = int(ref_code.shape[0])
+        total_len = int(codes_for_decode.shape[0])
+        cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+        wav = wav[cut:]
+
+    return wav, sr
+
+
+def run_conversation(
+    voice_a: str,
+    voice_b: str,
+    name_a: str,
+    name_b: str,
+    personality_a: str,
+    personality_b: str,
+    topic: str,
+    num_turns: int,
+    pause_between: float,
+    model_size: str,
+    progress=gr.Progress()
+):
+    """Run a full conversation between two AI personas."""
+    global llm_model
+
+    if llm_model is None:
+        return None, "❌ Error: Please load the LLM first in the Models tab.", ""
+
+    if not voice_a or not voice_b:
+        return None, "❌ Error: Please select both voice files.", ""
+
+    if not name_a or not name_b:
+        return None, "❌ Error: Please enter names for both speakers.", ""
+
+    if not topic:
+        return None, "❌ Error: Please enter a conversation topic.", ""
+
+    print(f"\n{'='*60}")
+    print(f"🎭 Starting Conversation Mode")
+    print(f"{'='*60}")
+    print(f"👤 Speaker A: {name_a} ({voice_a})")
+    print(f"👤 Speaker B: {name_b} ({voice_b})")
+    print(f"📝 Topic: {topic}")
+    print(f"🔄 Turns: {num_turns}")
+    print(f"{'='*60}\n")
+
+    conversation_history = []
+    all_audio = []
+    transcript_lines = []
+    sr = None
+
+    speakers = [
+        {"name": name_a, "personality": personality_a, "voice": voice_a},
+        {"name": name_b, "personality": personality_b, "voice": voice_b},
+    ]
+
+    total_steps = num_turns * 2  # Each turn has LLM generation + TTS
+    current_step = 0
+
+    for turn_idx in range(num_turns):
+        for speaker_idx, speaker in enumerate(speakers):
+            other_speaker = speakers[1 - speaker_idx]
+
+            # Generate dialogue
+            progress(current_step / total_steps, desc=f"🤖 {speaker['name']} is thinking...")
+            print(f"🤖 Generating dialogue for {speaker['name']}...")
+
+            try:
+                text = generate_conversation_turn(
+                    conversation_history=conversation_history,
+                    speaker_name=speaker["name"],
+                    speaker_personality=speaker["personality"],
+                    other_speaker_name=other_speaker["name"],
+                    topic=topic,
+                    is_first_turn=(turn_idx == 0 and speaker_idx == 0)
+                )
+            except Exception as e:
+                print(f"❌ LLM Error: {e}")
+                return None, f"❌ LLM Error: {str(e)}", "\n".join(transcript_lines)
+
+            print(f"   💬 {speaker['name']}: {text}")
+
+            conversation_history.append({"speaker": speaker["name"], "text": text})
+            transcript_lines.append(f"**{speaker['name']}:** {text}")
+
+            current_step += 1
+
+            # Generate audio
+            progress(current_step / total_steps, desc=f"🎙️ {speaker['name']} is speaking...")
+            print(f"🎙️ Generating audio for {speaker['name']}...")
+
+            try:
+                wav, sr = generate_voice_for_text(speaker["voice"], text, model_size)
+                all_audio.append(wav)
+
+                # Add pause between speakers
+                if pause_between > 0:
+                    pause_samples = int(sr * pause_between)
+                    all_audio.append(np.zeros(pause_samples, dtype=np.float32))
+
+                print(f"   ✅ Generated {len(wav)/sr:.2f}s of audio")
+            except Exception as e:
+                print(f"❌ TTS Error: {e}")
+                return None, f"❌ TTS Error: {str(e)}", "\n".join(transcript_lines)
+
+            current_step += 1
+
+    # Concatenate all audio
+    if all_audio:
+        final_audio = np.concatenate(all_audio)
+        total_duration = len(final_audio) / sr
+
+        print(f"\n{'='*60}")
+        print(f"✅ Conversation complete!")
+        print(f"📊 Total duration: {total_duration:.2f}s")
+        print(f"💬 Total turns: {num_turns * 2}")
+        print(f"{'='*60}\n")
+
+        status = f"✅ Generated {num_turns * 2} turns, {total_duration:.1f}s total"
+        transcript = "\n\n".join(transcript_lines)
+
+        return (sr, final_audio), status, transcript
+
+    return None, "❌ No audio generated.", ""
+
+
 # Build Gradio UI
 def build_ui():
     theme = gr.themes.Soft(
@@ -1044,6 +1418,44 @@ def build_ui():
                     unload_all_models,
                     inputs=[],
                     outputs=[unload_status, loaded_status],
+                )
+
+                # LLM Models section (for Conversation Mode)
+                with gr.Accordion("🤖 LLM Models (for Conversation Mode)", open=False):
+                    gr.Markdown("*💡 Download and load the LLM to enable AI-powered conversation generation.*")
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            llm_dropdown = gr.Dropdown(
+                                label="LLM Model",
+                                choices=list(AVAILABLE_LLMS.keys()),
+                                value="Qwen3-4B-Instruct",
+                                interactive=True,
+                            )
+                            with gr.Row():
+                                llm_download_btn = gr.Button("📥 Download", variant="primary", size="sm")
+                                llm_load_btn = gr.Button("🚀 Load", variant="secondary", size="sm")
+                                llm_unload_btn = gr.Button("🗑️ Unload", variant="stop", size="sm")
+                            llm_status = gr.Textbox(label="Status", lines=1, interactive=False)
+                        with gr.Column(scale=2):
+                            llm_download_status = gr.Markdown(value=get_llm_download_status)
+                            llm_loaded_status = gr.Markdown(value=get_llm_loaded_status)
+
+                llm_download_btn.click(
+                    download_llm,
+                    inputs=[llm_dropdown],
+                    outputs=[llm_status, llm_download_status],
+                )
+
+                llm_load_btn.click(
+                    load_llm,
+                    inputs=[llm_dropdown],
+                    outputs=[llm_status, llm_loaded_status],
+                )
+
+                llm_unload_btn.click(
+                    unload_llm,
+                    inputs=[],
+                    outputs=[llm_status, llm_loaded_status],
                 )
 
             # Tab 1: Voice Design
@@ -1361,6 +1773,116 @@ def build_ui():
                     generate_custom_voice,
                     inputs=[tts_text, tts_language, tts_speaker, tts_instruct, tts_model_size, tts_seed],
                     outputs=[tts_audio_out, tts_status],
+                )
+
+            # Tab 4: Conversation Mode
+            with gr.Tab("💬 Conversation Mode"):
+                gr.Markdown("""
+                ### AI-Powered Conversation Generator
+                *Create dynamic conversations between two AI personas using saved voice profiles.*
+
+                **Requirements:**
+                1. Download & Load the LLM in the Models tab
+                2. Save at least 2 voice profiles in Voice Clone → Save/Load Voice
+                """)
+
+                with gr.Row(equal_height=True):
+                    # Left column: Speaker A
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 👤 Speaker A")
+                        conv_voice_a = gr.Dropdown(
+                            label="Voice Profile",
+                            choices=get_saved_voices_list(),
+                            interactive=True,
+                        )
+                        conv_name_a = gr.Textbox(
+                            label="Name",
+                            placeholder="e.g., Alex",
+                            value="Alex",
+                        )
+                        conv_personality_a = gr.Textbox(
+                            label="Personality",
+                            lines=3,
+                            placeholder="Describe this character's personality...",
+                            value="You are a curious and enthusiastic tech enthusiast who loves discussing new innovations. You ask thoughtful questions and share interesting facts.",
+                        )
+
+                    # Middle column: Speaker B
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 👤 Speaker B")
+                        conv_voice_b = gr.Dropdown(
+                            label="Voice Profile",
+                            choices=get_saved_voices_list(),
+                            interactive=True,
+                        )
+                        conv_name_b = gr.Textbox(
+                            label="Name",
+                            placeholder="e.g., Jordan",
+                            value="Jordan",
+                        )
+                        conv_personality_b = gr.Textbox(
+                            label="Personality",
+                            lines=3,
+                            placeholder="Describe this character's personality...",
+                            value="You are a pragmatic realist who likes to consider both sides of any topic. You're friendly but sometimes play devil's advocate to spark interesting discussion.",
+                        )
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        conv_topic = gr.Textbox(
+                            label="Conversation Topic",
+                            lines=2,
+                            placeholder="What should they talk about?",
+                            value="The future of artificial intelligence and how it will change everyday life",
+                        )
+                    with gr.Column(scale=1):
+                        conv_turns = gr.Slider(
+                            label="Number of Turns (exchanges)",
+                            minimum=1,
+                            maximum=20,
+                            value=5,
+                            step=1,
+                        )
+                        conv_pause = gr.Slider(
+                            label="Pause Between Speakers (s)",
+                            minimum=0.0,
+                            maximum=3.0,
+                            value=0.5,
+                            step=0.1,
+                        )
+                        conv_model_size = gr.Dropdown(
+                            label="TTS Model Size",
+                            choices=MODEL_SIZES,
+                            value="1.7B",
+                            interactive=True,
+                        )
+
+                with gr.Row():
+                    conv_refresh_btn = gr.Button("🔄 Refresh Voice List", size="sm")
+                    conv_generate_btn = gr.Button("🎭 Generate Conversation", variant="primary", size="lg")
+
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=1):
+                        conv_audio_out = gr.Audio(label="Generated Conversation", type="numpy")
+                        conv_status = gr.Textbox(label="Status", lines=2, interactive=False)
+                    with gr.Column(scale=1):
+                        conv_transcript = gr.Markdown(label="Transcript", value="*Transcript will appear here...*")
+
+                # Event handlers
+                conv_refresh_btn.click(
+                    lambda: (gr.update(choices=get_saved_voices_list()), gr.update(choices=get_saved_voices_list())),
+                    outputs=[conv_voice_a, conv_voice_b],
+                )
+
+                conv_generate_btn.click(
+                    run_conversation,
+                    inputs=[
+                        conv_voice_a, conv_voice_b,
+                        conv_name_a, conv_name_b,
+                        conv_personality_a, conv_personality_b,
+                        conv_topic, conv_turns, conv_pause, conv_model_size
+                    ],
+                    outputs=[conv_audio_out, conv_status, conv_transcript],
                 )
 
     return demo, theme, css
