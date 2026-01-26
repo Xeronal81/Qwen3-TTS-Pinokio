@@ -650,15 +650,23 @@ def save_voice_file(ref_audio, ref_text, use_xvector_only, voice_name, model_siz
 
         spk_emb = tts.model.extract_speaker_embedding(audio=wav_resample, sr=speaker_encoder_sr)
         # Convert bfloat16 to float32 before numpy (numpy doesn't support bfloat16)
-        spk_emb_np = spk_emb.cpu().float().numpy()
+        spk_emb_cpu = spk_emb.cpu()
+        if spk_emb_cpu.dtype == torch.bfloat16:
+            spk_emb_np = spk_emb_cpu.float().numpy()
+        else:
+            spk_emb_np = spk_emb_cpu.numpy()
 
         # Extract speech codes if not x-vector only mode
         ref_code_np = None
         if not use_xvector_only:
             enc = tts.model.speech_tokenizer.encode([wav], sr=sr)
             ref_code = enc.audio_codes[0]
-            # Convert to float32 if needed before numpy
-            ref_code_np = ref_code.cpu().float().numpy()
+            # Speech codes are typically integers, but handle bfloat16 just in case
+            ref_code_cpu = ref_code.cpu()
+            if ref_code_cpu.dtype == torch.bfloat16:
+                ref_code_np = ref_code_cpu.float().numpy()
+            else:
+                ref_code_np = ref_code_cpu.numpy()
 
         # Save to file
         filepath = os.path.join(VOICE_FILES_DIR, f"{voice_name}.npz")
