@@ -609,14 +609,16 @@ def save_voice_file(ref_audio, ref_text, use_xvector_only, voice_name, model_siz
             wav_resample = librosa.resample(y=wav.astype(np.float32), orig_sr=int(sr), target_sr=speaker_encoder_sr)
 
         spk_emb = tts.model.extract_speaker_embedding(audio=wav_resample, sr=speaker_encoder_sr)
-        spk_emb_np = spk_emb.cpu().numpy()
+        # Convert bfloat16 to float32 before numpy (numpy doesn't support bfloat16)
+        spk_emb_np = spk_emb.cpu().float().numpy()
 
         # Extract speech codes if not x-vector only mode
         ref_code_np = None
         if not use_xvector_only:
             enc = tts.model.speech_tokenizer.encode([wav], sr=sr)
             ref_code = enc.audio_codes[0]
-            ref_code_np = ref_code.cpu().numpy()
+            # Convert to float32 if needed before numpy
+            ref_code_np = ref_code.cpu().float().numpy()
 
         # Save to file
         filepath = os.path.join(VOICE_FILES_DIR, f"{voice_name}.npz")
