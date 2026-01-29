@@ -48,7 +48,7 @@
         "input": null,
         "message": [
           "uv pip install -r requirements.txt",
-          "pip install hyperpyyaml modelscope inflect omegaconf conformer diffusers hydra-core lightning x-transformers onnxruntime gdown pyworld"
+          "pip install hyperpyyaml modelscope inflect omegaconf conformer diffusers hydra-core lightning x-transformers onnxruntime gdown pyworld matplotlib"
         ]
       }
     },
