@@ -48,8 +48,7 @@
         "input": null,
         "message": [
           "uv pip install -r requirements.txt",
-          "uv pip install -r CosyVoice/requirements.txt",
-          "uv pip install hyperpyyaml modelscope inflect omegaconf conformer diffusers hydra-core"
+          "pip install hyperpyyaml modelscope inflect omegaconf conformer diffusers hydra-core lightning x-transformers onnxruntime gdown pyworld"
         ]
       }
     },
