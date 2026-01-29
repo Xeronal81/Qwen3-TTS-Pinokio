@@ -25,6 +25,15 @@
     {
       "method": "shell.run",
       "params": {
+        "path": "app",
+        "message": [
+          "git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git CosyVoice"
+        ]
+      }
+    },
+    {
+      "method": "shell.run",
+      "params": {
         "message": [
           "conda install -y sox"
         ]
@@ -38,7 +47,8 @@
         "chain": true,
         "input": null,
         "message": [
-          "uv pip install -r requirements.txt"
+          "uv pip install -r requirements.txt",
+          "uv pip install -r CosyVoice/requirements.txt"
         ]
       }
     },

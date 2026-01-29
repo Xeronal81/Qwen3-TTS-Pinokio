@@ -97,6 +97,11 @@ loaded_models = {}
 llm_model = None
 llm_tokenizer = None
 
+# Global CosyVoice model holder
+cosyvoice_model = None
+COSYVOICE_MODEL_ID = "FunAudioLLM/CosyVoice2-0.5B"
+COSYVOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CosyVoice")
+
 # Model size options
 MODEL_SIZES = ["0.6B", "1.7B"]
 
@@ -446,6 +451,102 @@ def generate_llm_response(messages: list, max_tokens: int = 150) -> str:
     return response.strip()
 
 
+# ============================================
+# CosyVoice Model Management
+# ============================================
+
+def check_cosyvoice_downloaded() -> bool:
+    """Check if CosyVoice model is downloaded."""
+    try:
+        cache_info = scan_cache_dir()
+        for repo in cache_info.repos:
+            if repo.repo_id == COSYVOICE_MODEL_ID:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def get_cosyvoice_status() -> str:
+    """Get CosyVoice download/load status markdown."""
+    downloaded = "✅ Downloaded" if check_cosyvoice_downloaded() else "❌ Not downloaded"
+    loaded = "🟢 Loaded" if cosyvoice_model is not None else "⚪ Not loaded"
+    return f"**CosyVoice 2 (0.5B)** - Low-latency streaming TTS\n- Download: {downloaded}\n- Status: {loaded}"
+
+
+def download_cosyvoice(progress=gr.Progress()):
+    """Download CosyVoice model weights."""
+    if check_cosyvoice_downloaded():
+        return "✅ CosyVoice already downloaded!", get_cosyvoice_status()
+    try:
+        progress(0, desc="Downloading CosyVoice model...")
+        snapshot_download(COSYVOICE_MODEL_ID)
+        progress(1, desc="Complete!")
+        return "✅ CosyVoice downloaded successfully!", get_cosyvoice_status()
+    except Exception as e:
+        return f"❌ Error downloading CosyVoice: {str(e)}", get_cosyvoice_status()
+
+
+def load_cosyvoice(progress=gr.Progress()):
+    """Load CosyVoice model into memory."""
+    global cosyvoice_model
+
+    if cosyvoice_model is not None:
+        return "✅ CosyVoice is already loaded!", get_cosyvoice_status()
+
+    try:
+        progress(0, desc="Loading CosyVoice...")
+
+        print(f"\n{'='*50}")
+        print(f"🎙️ Loading CosyVoice...")
+        print(f"{'='*50}")
+
+        # Add CosyVoice to sys.path for imports
+        cosyvoice_path = COSYVOICE_DIR
+        matcha_path = os.path.join(cosyvoice_path, "third_party", "Matcha-TTS")
+        if cosyvoice_path not in sys.path:
+            sys.path.insert(0, cosyvoice_path)
+        if os.path.exists(matcha_path) and matcha_path not in sys.path:
+            sys.path.insert(0, matcha_path)
+
+        from cosyvoice.cli.cosyvoice import AutoModel as CosyAutoModel
+
+        model_dir = snapshot_download(COSYVOICE_MODEL_ID)
+        cosyvoice_model = CosyAutoModel(model_dir=model_dir)
+
+        progress(1, desc="Complete!")
+        print(f"✅ CosyVoice loaded successfully!")
+        print(f"   Sample rate: {cosyvoice_model.sample_rate}")
+        print(f"{'='*50}\n")
+
+        return "✅ CosyVoice loaded successfully!", get_cosyvoice_status()
+    except Exception as e:
+        print(f"❌ Error loading CosyVoice: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"❌ Error loading CosyVoice: {str(e)}", get_cosyvoice_status()
+
+
+def unload_cosyvoice():
+    """Unload CosyVoice from memory."""
+    global cosyvoice_model
+
+    if cosyvoice_model is None:
+        return "⚠️ CosyVoice is not loaded.", get_cosyvoice_status()
+
+    try:
+        del cosyvoice_model
+        cosyvoice_model = None
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return "✅ CosyVoice unloaded.", get_cosyvoice_status()
+    except Exception as e:
+        cosyvoice_model = None
+        return f"❌ Error: {str(e)}", get_cosyvoice_status()
+
+
 def _normalize_audio(wav, eps=1e-12, clip=True):
     """Normalize audio to float32 in [-1, 1] range."""
     x = np.asarray(wav)
@@ -764,7 +865,10 @@ def get_voice_files_info():
             ref_text = str(data.get('ref_text', ''))[:50]
             if ref_text and len(str(data.get('ref_text', ''))) > 50:
                 ref_text += "..."
-            lines.append(f"- **{voice}** ({mode})")
+            wav_exists = os.path.exists(os.path.join(VOICE_FILES_DIR, f"{voice}.wav"))
+            cosyvoice_ready = wav_exists and ref_text and not x_vector_only
+            compat = "Qwen3-TTS + CosyVoice" if cosyvoice_ready else "Qwen3-TTS only"
+            lines.append(f"- **{voice}** ({mode}) [{compat}]")
             if ref_text and not x_vector_only:
                 lines.append(f"  Text: \"{ref_text}\"")
         except Exception as e:
@@ -839,6 +943,12 @@ def save_voice_file(ref_audio, ref_text, use_xvector_only, voice_name, model_siz
             save_dict['ref_code'] = ref_code_np
 
         np.savez(filepath, **save_dict)
+
+        # Also save raw reference audio as WAV for CosyVoice compatibility
+        import soundfile as sf
+        wav_filepath = os.path.join(VOICE_FILES_DIR, f"{voice_name}.wav")
+        sf.write(wav_filepath, wav.astype(np.float32), int(sr))
+        print(f"   Also saved WAV for CosyVoice: {wav_filepath}")
 
         print(f"✅ Saved to: {filepath}")
         print(f"{'='*50}\n")
@@ -1002,6 +1112,10 @@ def delete_voice_file(voice_file):
 
     try:
         os.remove(filepath)
+        # Also remove companion WAV file if it exists
+        wav_path = os.path.join(VOICE_FILES_DIR, f"{voice_file}.wav")
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
         new_choices = get_saved_voices_list()
         new_value = new_choices[0] if new_choices else None
         return f"✅ Deleted voice file '{voice_file}'.", get_voice_files_info(), gr.update(choices=new_choices, value=new_value)
@@ -1134,6 +1248,47 @@ def generate_voice_for_text(voice_file: str, text: str, model_size: str = "1.7B"
         cut = int(ref_len / max(total_len, 1) * wav.shape[0])
         wav = wav[cut:]
 
+    return wav, sr
+
+
+def generate_voice_cosyvoice(voice_file: str, text: str) -> tuple:
+    """Generate audio using CosyVoice zero-shot voice cloning with streaming."""
+    global cosyvoice_model
+
+    if cosyvoice_model is None:
+        raise RuntimeError("CosyVoice not loaded. Load it in the Models tab.")
+
+    # Load reference audio WAV
+    wav_path = os.path.join(VOICE_FILES_DIR, f"{voice_file}.wav")
+    if not os.path.exists(wav_path):
+        raise FileNotFoundError(
+            f"No reference WAV found for '{voice_file}'. "
+            "Re-save this voice to generate a CosyVoice-compatible WAV file."
+        )
+
+    # Load reference text from the .npz
+    npz_path = os.path.join(VOICE_FILES_DIR, f"{voice_file}.npz")
+    data = np.load(npz_path, allow_pickle=True)
+    prompt_text = str(data.get('ref_text', ''))
+    if not prompt_text:
+        raise ValueError(
+            f"Voice '{voice_file}' has no reference text. "
+            "CosyVoice requires reference text for zero-shot cloning."
+        )
+
+    # Generate with streaming for low latency
+    all_chunks = []
+    for chunk in cosyvoice_model.inference_zero_shot(
+        tts_text=text,
+        prompt_text=prompt_text,
+        prompt_wav=wav_path,
+        stream=True,
+    ):
+        audio = chunk['tts_speech'].numpy().flatten()
+        all_chunks.append(audio)
+
+    wav = np.concatenate(all_chunks)
+    sr = cosyvoice_model.sample_rate
     return wav, sr
 
 
@@ -1280,6 +1435,7 @@ def voice_chat_respond(
     personality: str,
     ai_name: str,
     model_size: str,
+    tts_engine: str = "Qwen3-TTS",
     max_history: int = 10
 ):
     """Process voice input and generate voice response."""
@@ -1337,7 +1493,12 @@ You are having a natural voice conversation. Rules:
         print(f"   ⏱️ LLM: {llm_time - stt_time:.2f}s")
 
         # Step 3: Generate TTS
-        wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
+        engine_label = tts_engine if tts_engine else "Qwen3-TTS"
+        print(f"   🔊 TTS Engine: {engine_label}")
+        if engine_label == "CosyVoice":
+            wav, sr = generate_voice_cosyvoice(voice_file, ai_response)
+        else:
+            wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
         tts_time = time.time()
         print(f"   ⏱️ TTS: {tts_time - llm_time:.2f}s")
 
@@ -1356,7 +1517,7 @@ You are having a natural voice conversation. Rules:
         for turn in voice_chat_history:
             chat_display.append((turn["user"], turn["assistant"]))
 
-        status = f"✅ Response generated in {total_time:.1f}s (STT: {stt_time-start_time:.1f}s, LLM: {llm_time-stt_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
+        status = f"✅ [{engine_label}] Response in {total_time:.1f}s (STT: {stt_time-start_time:.1f}s, LLM: {llm_time-stt_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
 
         return (sr, wav), status, chat_display
 
@@ -1375,6 +1536,7 @@ def text_chat_respond(
     personality: str,
     ai_name: str,
     model_size: str,
+    tts_engine: str = "Qwen3-TTS",
     max_history: int = 10
 ):
     """Process text input and generate voice response (for typing instead of speaking)."""
@@ -1423,7 +1585,12 @@ You are having a natural voice conversation. Rules:
         print(f"   ⏱️ LLM: {llm_time - start_time:.2f}s")
 
         # Generate TTS
-        wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
+        engine_label = tts_engine if tts_engine else "Qwen3-TTS"
+        print(f"   🔊 TTS Engine: {engine_label}")
+        if engine_label == "CosyVoice":
+            wav, sr = generate_voice_cosyvoice(voice_file, ai_response)
+        else:
+            wav, sr = generate_voice_for_text(voice_file, ai_response, model_size)
         tts_time = time.time()
         print(f"   ⏱️ TTS: {tts_time - llm_time:.2f}s")
 
@@ -1442,7 +1609,7 @@ You are having a natural voice conversation. Rules:
         for turn in voice_chat_history:
             chat_display.append((turn["user"], turn["assistant"]))
 
-        status = f"✅ Response in {total_time:.1f}s (LLM: {llm_time-start_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
+        status = f"✅ [{engine_label}] Response in {total_time:.1f}s (LLM: {llm_time-start_time:.1f}s, TTS: {tts_time-llm_time:.1f}s)"
 
         return (sr, wav), status, chat_display, ""  # Clear text input
 
@@ -1684,6 +1851,34 @@ def build_ui():
                     unload_llm,
                     inputs=[],
                     outputs=[llm_status, llm_loaded_status],
+                )
+
+                # CosyVoice TTS section (for Voice Chat)
+                with gr.Accordion("🎙️ CosyVoice TTS (for Voice Chat)", open=False):
+                    gr.Markdown("*Optional: Download and load CosyVoice for low-latency streaming TTS in Voice Chat.*")
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            with gr.Row():
+                                cosyvoice_download_btn = gr.Button("📥 Download", variant="primary", size="sm")
+                                cosyvoice_load_btn = gr.Button("🚀 Load", variant="secondary", size="sm")
+                                cosyvoice_unload_btn = gr.Button("🗑️ Unload", variant="stop", size="sm")
+                            cosyvoice_status = gr.Textbox(label="Status", lines=1, interactive=False)
+                        with gr.Column(scale=2):
+                            cosyvoice_info = gr.Markdown(value=get_cosyvoice_status)
+
+                cosyvoice_download_btn.click(
+                    download_cosyvoice,
+                    outputs=[cosyvoice_status, cosyvoice_info],
+                )
+
+                cosyvoice_load_btn.click(
+                    load_cosyvoice,
+                    outputs=[cosyvoice_status, cosyvoice_info],
+                )
+
+                cosyvoice_unload_btn.click(
+                    unload_cosyvoice,
+                    outputs=[cosyvoice_status, cosyvoice_info],
                 )
 
             # Tab 1: Voice Design
@@ -2121,7 +2316,7 @@ def build_ui():
 
                 **Requirements:**
                 1. Load the LLM in the Models tab
-                2. Load the Base TTS model (will auto-load on first use)
+                2. Load a TTS engine: **Qwen3-TTS** (auto-loads) or **CosyVoice** (load in Models tab)
                 3. Select a saved voice profile
                 """)
 
@@ -2144,8 +2339,14 @@ def build_ui():
                             value="You are a friendly and helpful AI assistant. You're knowledgeable, witty, and enjoy having conversations. You speak naturally and concisely.",
                             placeholder="Describe the AI's personality...",
                         )
+                        chat_tts_engine = gr.Radio(
+                            label="TTS Engine",
+                            choices=["Qwen3-TTS", "CosyVoice"],
+                            value="Qwen3-TTS",
+                            interactive=True,
+                        )
                         chat_model_size = gr.Dropdown(
-                            label="TTS Model Size",
+                            label="TTS Model Size (Qwen3-TTS only)",
                             choices=MODEL_SIZES,
                             value="1.7B",
                             interactive=True,
@@ -2193,22 +2394,29 @@ def build_ui():
                     outputs=[chat_voice],
                 )
 
+                # Hide model size when CosyVoice is selected
+                chat_tts_engine.change(
+                    lambda engine: gr.update(visible=(engine == "Qwen3-TTS")),
+                    inputs=[chat_tts_engine],
+                    outputs=[chat_model_size],
+                )
+
                 chat_voice_btn.click(
                     voice_chat_respond,
-                    inputs=[chat_audio_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    inputs=[chat_audio_input, chat_voice, chat_personality, chat_ai_name, chat_model_size, chat_tts_engine],
                     outputs=[chat_audio_output, chat_status, chat_history_display],
                 )
 
                 chat_text_btn.click(
                     text_chat_respond,
-                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size, chat_tts_engine],
                     outputs=[chat_audio_output, chat_status, chat_history_display, chat_text_input],
                 )
 
                 # Also allow Enter key to send text
                 chat_text_input.submit(
                     text_chat_respond,
-                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size],
+                    inputs=[chat_text_input, chat_voice, chat_personality, chat_ai_name, chat_model_size, chat_tts_engine],
                     outputs=[chat_audio_output, chat_status, chat_history_display, chat_text_input],
                 )
 
