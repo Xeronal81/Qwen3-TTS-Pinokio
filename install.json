@@ -49,7 +49,7 @@
         "message": [
           "uv pip install -r requirements.txt",
           "uv pip install -r CosyVoice/requirements.txt",
-          "uv pip install hyperpyyaml modelscope inflect"
+          "uv pip install hyperpyyaml modelscope inflect omegaconf"
         ]
       }
     },
